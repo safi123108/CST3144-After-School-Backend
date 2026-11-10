@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="#e8efe8"/>
+  <rect x="170" y="100" width="60" height="120" rx="4" fill="#4a6741"/>
+  <circle cx="200" cy="70" r="20" fill="#5d7a5e"/>
+  <circle cx="190" cy="60" r="4" fill="#2c3331"/>
+  <circle cx="210" cy="60" r="4" fill="#2c3331"/>
+  <path d="M 185 85 Q 200 105 215 85" stroke="#2c3331" stroke-width="3" fill="none"/>
+  <rect x="170" y="180" width="60" height="20" rx="4" fill="#2c3331"/>
+  <text x="200" y="270" text-anchor="middle" font-family="Arial" font-size="16" fill="#6b7a6c">French</text>
+</svg>

@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="#e8efe8"/>
+  <circle cx="200" cy="120" r="20" fill="#4a6741"/>
+  <path d="M 180 140 Q 200 160 220 140" stroke="#4a6741" stroke-width="4" fill="none"/>
+  <path d="M 190 145 Q 200 165 210 145" stroke="#4a6741" stroke-width="4" fill="none"/>
+  <rect x="190" y="60" width="20" height="40" fill="#5d7a5e"/>
+  <text x="200" y="270" text-anchor="middle" font-family="Arial" font-size="16" fill="#6b7a6c">Music</text>
+</svg>

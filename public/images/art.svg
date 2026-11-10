@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" viewBox="0 0 400 300">
+  <rect width="400" height="300" fill="#e8efe8"/>
+  <rect x="180" y="100" width="40" height="120" rx="4" fill="#4a6741"/>
+  <ellipse cx="200" cy="80" rx="25" ry="20" fill="#5d7a5e"/>
+  <rect x="190" y="50" width="20" height="30" fill="#2c3331"/>
+  <rect x="170" y="180" width="60" height="20" rx="4" fill="#2c3331"/>
+  <text x="200" y="270" text-anchor="middle" font-family="Arial" font-size="16" fill="#6b7a6c">Art</text>
+</svg>
