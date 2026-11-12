@@ -1,0 +1,23 @@
+# Render Blueprint specification for deploying this Express.js + MongoDB Atlas backend.
+# Before deploying via a Render Blueprint:
+#   1. Replace <student-number> below with your student ID for the Render service name.
+#   2. Enter real values for sync: false variables (MONGODB_URI, CORS_ORIGIN) in the Render Dashboard.
+services:
+  - type: web
+    name: after-school-app-backend-<student-number>
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: "22"
+      - key: MONGODB_URI
+        sync: false
+      - key: DB_NAME
+        value: after_school_app
+      - key: CORS_ORIGIN
+        sync: false
