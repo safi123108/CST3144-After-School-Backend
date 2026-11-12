@@ -3,14 +3,10 @@ const cors = require('cors');
 const path = require('path');
 const { ObjectId } = require('mongodb');
 const { createImageMiddleware } = require('./middleware/images');
+const { fetchAllLessons, searchLessons } = require('./services/lessons');
 
 const DEFAULT_DB_NAME = 'after_school_app';
 const DEFAULT_IMAGES_DIR = path.join(__dirname, 'public', 'images');
-
-// Helper function to safely escape regex special characters
-function escapeRegex(text) {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
 
 function resolveAccessor(accessorFn, fallbackValue) {
   return typeof accessorFn === 'function' ? accessorFn : () => (fallbackValue ?? null);
@@ -124,7 +120,7 @@ function createApp(options = {}) {
   app.get('/lessons', async (req, res) => {
     const db = getDb();
     try {
-      const lessons = await db.collection('lesson').find({}).toArray();
+      const lessons = await fetchAllLessons(db);
       res.json(lessons);
     } catch (error) {
       console.error('Error retrieving lessons:', error.message);
@@ -140,22 +136,8 @@ function createApp(options = {}) {
     const db = getDb();
     const rawQ = req.query.q;
 
-    // 1. If q is undefined, return all lessons
-    if (rawQ === undefined) {
-      try {
-        const lessons = await db.collection('lesson').find({}).toArray();
-        return res.json(lessons);
-      } catch (error) {
-        console.error('Error in search (all lessons):', error.message);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve lessons from database'
-        });
-      }
-    }
-
-    // 2. Reject repeated q parameters (arrays) or non-string types
-    if (typeof rawQ !== 'string') {
+    // 1. Reject repeated q parameters (arrays) or non-string types when provided
+    if (rawQ !== undefined && typeof rawQ !== 'string') {
       return res.status(400).json({
         success: false,
         error: 'Invalid query parameter',
@@ -163,23 +145,9 @@ function createApp(options = {}) {
       });
     }
 
-    const query = rawQ.trim();
+    const query = rawQ === undefined ? '' : rawQ.trim();
 
-    // 3. If q is empty or blank whitespace, return all lessons
-    if (query.length === 0) {
-      try {
-        const lessons = await db.collection('lesson').find({}).toArray();
-        return res.json(lessons);
-      } catch (error) {
-        console.error('Error in search (empty query):', error.message);
-        return res.status(500).json({
-          success: false,
-          message: 'Failed to retrieve lessons from database'
-        });
-      }
-    }
-
-    // 4. Reject search queries longer than 100 characters
+    // 2. Reject search queries longer than 100 characters
     if (query.length > 100) {
       return res.status(400).json({
         success: false,
@@ -188,27 +156,15 @@ function createApp(options = {}) {
       });
     }
 
-    // 5. Build safe, case-insensitive multi-attribute regex filter
-    const escaped = escapeRegex(query);
-    const regex = new RegExp(escaped, 'i');
-
-    const filter = {
-      $or: [
-        { topic: { $regex: regex } },
-        { location: { $regex: regex } },
-        { $expr: { $regexMatch: { input: { $ifNull: [{ $toString: '$price' }, ''] }, regex: escaped, options: 'i' } } },
-        { $expr: { $regexMatch: { input: { $ifNull: [{ $toString: '$space' }, ''] }, regex: escaped, options: 'i' } } }
-      ]
-    };
-
+    // 3. Return all lessons for missing/blank queries, or execute multi-attribute filter search
     try {
-      const results = await db.collection('lesson').find(filter).toArray();
-      res.json(results);
+      const results = await searchLessons(db, query);
+      return res.json(results);
     } catch (error) {
       console.error('Error performing lesson search:', error.message);
-      res.status(500).json({
+      return res.status(500).json({
         success: false,
-        message: 'Failed to perform search in database'
+        message: query ? 'Failed to perform search in database' : 'Failed to retrieve lessons from database'
       });
     }
   });
