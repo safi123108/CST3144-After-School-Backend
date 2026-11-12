@@ -29,6 +29,38 @@ function requireSessionClient(getClient, res) {
   return client;
 }
 
+function handleTransactionError(res, err, fallbackMessage, defaultConflictMessage) {
+  if (err && err.statusCode === 409) {
+    return res.status(409).json({
+      success: false,
+      error: 'Conflict',
+      message: err.message || defaultConflictMessage
+    });
+  }
+
+  if (err && err.statusCode === 404) {
+    return res.status(404).json({
+      success: false,
+      error: 'Not found',
+      message: err.message
+    });
+  }
+
+  if (err && err.statusCode === 400) {
+    return res.status(400).json({
+      success: false,
+      error: err.errorCode || 'Bad request',
+      message: err.message
+    });
+  }
+
+  console.error('Transaction error:', err && err.message ? err.message : err);
+  return res.status(500).json({
+    success: false,
+    message: fallbackMessage
+  });
+}
+
 /**
  * Create and configure the Express application with injected database accessors.
  * Keeping app construction separate from server startup enables isolated testing.
@@ -195,14 +227,15 @@ function createApp(options = {}) {
       });
     }
 
+    const lessonObjectId = new ObjectId(id);
     const updates = req.body;
 
-    // 2. Reject empty request body
-    if (!updates || typeof updates !== 'object' || Object.keys(updates).length === 0) {
+    // 2. Reject empty or non-object request bodies
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates) || Object.keys(updates).length === 0) {
       return res.status(400).json({
         success: false,
         error: 'Empty update payload',
-        message: 'Request body cannot be empty. Please provide at least one attribute to update.'
+        message: 'Request body must be a non-empty JSON object with at least one attribute to update.'
       });
     }
 
@@ -293,18 +326,30 @@ function createApp(options = {}) {
     try {
       // If orderId is present, this is an order confirmation PUT
       if ('orderId' in updateData) {
-        res.on('finish', () => {
-          console.log(`[PUT /lessons/:id] confirmation status=${res.statusCode} lessonId=${id} orderId=${String(updateData.orderId)}`);
-        });
         const { orderId } = updateData;
 
-        if (!ObjectId.isValid(orderId)) {
+        if (!('space' in updateData)) {
           return res.status(400).json({
             success: false,
-            error: 'Invalid order ID',
-            message: "'orderId' must be a valid 24-character hexadecimal MongoDB ObjectId."
+            error: 'Missing space',
+            message: "Order confirmation updates require a non-negative integer 'space' value."
           });
         }
+
+        const extraFields = Object.keys(updateData).filter(
+          (field) => field !== 'orderId' && field !== 'space'
+        );
+        if (extraFields.length > 0) {
+          return res.status(400).json({
+            success: false,
+            error: 'Conflicting attributes',
+            message: `Order confirmation updates only permit 'orderId' and 'space'; unexpected field(s): ${extraFields.join(', ')}.`
+          });
+        }
+
+        res.on('finish', () => {
+          console.log(`[PUT /lessons/:id] confirmation status=${res.statusCode} lessonId=${id} orderId=${String(orderId)}`);
+        });
 
         const client = requireSessionClient(getClient, res);
         if (!client) return;
@@ -326,8 +371,9 @@ function createApp(options = {}) {
             }
 
             // Find the matching item for this lesson
-            const itemIndex = order.items.findIndex(
-              item => item.lessonId && item.lessonId.equals(new ObjectId(id))
+            const orderItems = Array.isArray(order.items) ? order.items : [];
+            const itemIndex = orderItems.findIndex(
+              item => item && item.lessonId && item.lessonId.equals(lessonObjectId)
             );
 
             if (itemIndex === -1) {
@@ -336,7 +382,7 @@ function createApp(options = {}) {
               throw error;
             }
 
-            const item = order.items[itemIndex];
+            const item = orderItems[itemIndex];
 
             // Cancelled items cannot be confirmed
             if (item.cancelled === true) {
@@ -351,9 +397,16 @@ function createApp(options = {}) {
               return;
             }
 
+            if (typeof item.space !== 'number' || !Number.isInteger(item.space) || item.space <= 0) {
+              const error = new Error('INVALID_ORDER_ITEM_SPACE');
+              error.statusCode = 400;
+              error.message = `Order '${orderId}' item for lesson '${id}' has an invalid space quantity.`;
+              throw error;
+            }
+
             // Read current lesson space for compare-and-set
             const existingLesson = await db.collection('lesson').findOne(
-              { _id: new ObjectId(id) },
+              { _id: lessonObjectId },
               { session }
             );
 
@@ -365,17 +418,9 @@ function createApp(options = {}) {
 
             const expectedCurrentSpace = updateData.space + item.space;
 
-            // Never allow negative spaces
-            if (updateData.space < 0) {
-              const error = new Error('NEGATIVE_SPACE');
-              error.statusCode = 400;
-              error.message = `Lesson '${existingLesson.topic || id}' space cannot be negative.`;
-              throw error;
-            }
-
             // Compare-and-set: only update if space hasn't changed since frontend read it
             const result = await db.collection('lesson').updateOne(
-              { _id: new ObjectId(id), space: expectedCurrentSpace },
+              { _id: lessonObjectId, space: expectedCurrentSpace },
               { $set: { space: updateData.space } },
               { session }
             );
@@ -389,7 +434,7 @@ function createApp(options = {}) {
 
             // Mark item confirmed
             await db.collection('order').updateOne(
-              { _id: orderObjectId, 'items.lessonId': new ObjectId(id) },
+              { _id: orderObjectId, 'items.lessonId': lessonObjectId },
               { $set: { 'items.$.confirmed': true } },
               { session }
             );
@@ -400,8 +445,9 @@ function createApp(options = {}) {
               { session }
             );
 
-            const allConfirmed = updatedOrder.items.every(
-              orderItem => orderItem.confirmed === true || orderItem.cancelled === true
+            const nextItems = updatedOrder && Array.isArray(updatedOrder.items) ? updatedOrder.items : [];
+            const allConfirmed = nextItems.length > 0 && nextItems.every(
+              orderItem => orderItem && (orderItem.confirmed === true || orderItem.cancelled === true)
             );
 
             if (allConfirmed) {
@@ -420,35 +466,12 @@ function createApp(options = {}) {
             orderId: orderId
           });
         } catch (transactionError) {
-          if (transactionError.statusCode === 409) {
-            return res.status(409).json({
-              success: false,
-              error: 'Conflict',
-              message: transactionError.message || 'Lesson space was changed by another operation.'
-            });
-          }
-
-          if (transactionError.statusCode === 404) {
-            return res.status(404).json({
-              success: false,
-              error: 'Not found',
-              message: transactionError.message
-            });
-          }
-
-          if (transactionError.statusCode === 400) {
-            return res.status(400).json({
-              success: false,
-              error: 'Bad request',
-              message: transactionError.message
-            });
-          }
-
-          console.error('Transaction error:', transactionError.message);
-          return res.status(500).json({
-            success: false,
-            message: 'Failed to update lesson space and order item'
-          });
+          return handleTransactionError(
+            res,
+            transactionError,
+            'Failed to update lesson space and order item',
+            'Lesson space was changed by another operation.'
+          );
         } finally {
           await session.endSession();
         }
@@ -930,7 +953,7 @@ function createApp(options = {}) {
     }
   });
 
-  // DELETE /orders/:orderId - cancel unconfirmed items in a pending order
+  // DELETE /orders/:orderId - cancel unconfirmed items in a pending order atomically
   app.delete('/orders/:orderId', async (req, res) => {
     const db = getDb();
     const { orderId } = req.params;
@@ -943,80 +966,104 @@ function createApp(options = {}) {
       });
     }
 
+    const client = requireSessionClient(getClient, res);
+    if (!client) return;
+
+    const orderObjectId = new ObjectId(orderId);
+    const session = client.startSession();
     try {
-      const order = await db.collection('order').findOne({ _id: new ObjectId(orderId) });
+      let finalStatus = null;
 
-      if (!order) {
-        return res.status(404).json({
-          success: false,
-          error: 'Not found',
-          message: `Order with ID '${orderId}' was not found.`
-        });
-      }
+      await session.withTransaction(async () => {
+        const order = await db.collection('order').findOne(
+          { _id: orderObjectId },
+          { session }
+        );
 
-      if (order.status === 'confirmed') {
-        return res.status(400).json({
-          success: false,
-          error: 'Cannot cancel',
-          message: `Order '${orderId}' is already confirmed and cannot be cancelled.`
-        });
-      }
-
-      const items = order.items || [];
-      let anyConfirmed = false;
-      let anyUnconfirmed = false;
-
-      for (const item of items) {
-        if (item.confirmed === true) {
-          anyConfirmed = true;
-        } else {
-          anyUnconfirmed = true;
+        if (!order) {
+          const error = new Error('ORDER_NOT_FOUND');
+          error.statusCode = 404;
+          error.message = `Order with ID '${orderId}' was not found.`;
+          throw error;
         }
-      }
 
-      if (!anyUnconfirmed) {
-        return res.status(400).json({
-          success: false,
-          error: 'Nothing to cancel',
-          message: `Order '${orderId}' has no unconfirmed items to cancel.`
-        });
-      }
-
-      // Cancel all unconfirmed items
-      for (const item of items) {
-        if (item.confirmed !== true) {
-          await db.collection('order').updateOne(
-            { _id: new ObjectId(orderId), 'items.lessonId': item.lessonId },
-            { $set: { 'items.$.cancelled': true } }
-          );
+        if (order.status === 'confirmed') {
+          const error = new Error('ORDER_ALREADY_CONFIRMED');
+          error.statusCode = 400;
+          error.errorCode = 'Cannot cancel';
+          error.message = `Order '${orderId}' is already confirmed and cannot be cancelled.`;
+          throw error;
         }
-      }
 
-      // Determine new order status
-      let newStatus;
-      if (anyConfirmed && anyUnconfirmed) {
-        newStatus = 'partially_cancelled';
-      } else {
-        newStatus = 'cancelled';
-      }
+        if (order.status === 'cancelled') {
+          const error = new Error('ORDER_ALREADY_CANCELLED');
+          error.statusCode = 400;
+          error.errorCode = 'Already cancelled';
+          error.message = `Order '${orderId}' is already cancelled.`;
+          throw error;
+        }
 
-      await db.collection('order').updateOne(
-        { _id: new ObjectId(orderId) },
-        { $set: { status: newStatus } }
-      );
+        const items = Array.isArray(order.items) ? order.items : [];
+        let anyConfirmed = false;
+        let anyCancellable = false;
 
-      res.json({
+        const updatedItems = items.map((item) => {
+          if (item && item.confirmed === true) {
+            anyConfirmed = true;
+            return item;
+          }
+          if (item && item.cancelled === true) {
+            return item;
+          }
+          anyCancellable = true;
+          return { ...item, cancelled: true };
+        });
+
+        if (!anyCancellable) {
+          const error = new Error('NOTHING_TO_CANCEL');
+          error.statusCode = 400;
+          error.errorCode = 'Nothing to cancel';
+          error.message = `Order '${orderId}' has no unconfirmed active items to cancel.`;
+          throw error;
+        }
+
+        // Preserve confirmed items on partial orders without altering lesson.space,
+        // because POST /orders does not decrement spaces before PUT /lessons/:id confirmation.
+        finalStatus = anyConfirmed ? 'partially_cancelled' : 'cancelled';
+
+        const updateFilter = order.status !== undefined
+          ? { _id: orderObjectId, status: order.status }
+          : { _id: orderObjectId };
+
+        const updateResult = await db.collection('order').updateOne(
+          updateFilter,
+          { $set: { items: updatedItems, status: finalStatus, cancelledAt: new Date() } },
+          { session }
+        );
+
+        if (updateResult.matchedCount === 0) {
+          const error = new Error('ORDER_STATE_CONFLICT');
+          error.statusCode = 409;
+          error.message = `Order '${orderId}' was changed by another operation. Please retry.`;
+          throw error;
+        }
+      });
+
+      return res.json({
         success: true,
         message: `Order '${orderId}' cancellation processed`,
         orderId: orderId,
-        status: newStatus
+        status: finalStatus
       });
     } catch (error) {
-      console.error('Error cancelling order:', error.message);
-      res.status(500).json({
-        success: false,
-        message: 'Failed to cancel order'
-      });
+      return handleTransactionError(
+        res,
+        error,
+        'Failed to cancel order',
+        'Order was changed by another operation.'
+      );
+    } finally {
+      await session.endSession();
     }
   });
 
