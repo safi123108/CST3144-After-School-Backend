@@ -1,9 +1,19 @@
+/**
+ * Seed initial teachers and lessons and ensure useful MongoDB indexes.
+ *
+ * Safe default (`node seed.js`):
+ *   Inserts missing teachers/lessons with `$setOnInsert` so live lesson
+ *   spaces, assignments, and order history are preserved on re-runs.
+ *
+ * Explicit reset (`node seed.js --reset`):
+ *   Restores seeded teachers and lessons (including `space: 5`) via `$set`
+ *   without deleting orders or user data.
+ */
 const path = require('path');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 const { MongoClient, ObjectId } = require('mongodb');
 
-const MONGODB_URI = process.env.MONGODB_URI;
-const DB_NAME = process.env.DB_NAME || 'after_school_app';
+const DEFAULT_DB_NAME = 'after_school_app';
 
 // Fixed predefined ObjectIds for teachers (3 teachers)
 const teacherIds = {
@@ -70,43 +80,164 @@ const lessons = [
   { _id: lessonIds.french, topic: 'French', location: 'Room 301', price: 10, space: 5, image: 'french.png', teacherId: teacherIds.alice },
 ];
 
-async function run() {
-  if (!MONGODB_URI) {
-    console.error('Error: MONGODB_URI is not defined in environment variables.');
-    process.exit(1);
+const INDEX_DEFINITIONS = [
+  {
+    collection: 'order',
+    keys: { 'items.lessonId': 1 },
+    options: { name: 'idx_order_items_lessonId' }
+  },
+  {
+    collection: 'teacher',
+    keys: { lessonIds: 1 },
+    options: { name: 'idx_teacher_lessonIds' }
+  }
+];
+
+function parseSeedOptions(argv = process.argv.slice(2)) {
+  const args = Array.isArray(argv) ? argv : [];
+  return {
+    reset: args.includes('--reset')
+  };
+}
+
+function hasSameKeySpec(existingKeys, targetKeys) {
+  const existingEntries = Object.entries(existingKeys || {});
+  const targetEntries = Object.entries(targetKeys || {});
+  if (existingEntries.length !== targetEntries.length) {
+    return false;
+  }
+  return existingEntries.every(
+    ([key, dir], index) => targetEntries[index][0] === key && targetEntries[index][1] === dir
+  );
+}
+
+/**
+ * Create essential query indexes while skipping indexes whose key spec already exists.
+ */
+async function ensureIndexes(db) {
+  const results = [];
+
+  for (const def of INDEX_DEFINITIONS) {
+    const col = db.collection(def.collection);
+    let existing = [];
+
+    if (typeof col.indexes === 'function') {
+      try {
+        existing = await col.indexes();
+      } catch (err) {
+        // NamespaceNotFound (code 26) occurs before a collection exists on MongoDB.
+        if (err && err.code !== 26) {
+          throw err;
+        }
+      }
+    }
+
+    const alreadyPresent = existing.find(
+      (idx) => idx && (idx.name === def.options.name || hasSameKeySpec(idx.key, def.keys))
+    );
+
+    if (alreadyPresent) {
+      results.push({
+        collection: def.collection,
+        name: alreadyPresent.name || def.options.name,
+        created: false
+      });
+      continue;
+    }
+
+    const indexName = await col.createIndex(def.keys, def.options);
+    results.push({
+      collection: def.collection,
+      name: indexName || def.options.name,
+      created: true
+    });
   }
 
-  const client = new MongoClient(MONGODB_URI);
+  return results;
+}
 
+async function upsertSeedCollection(collection, documents, reset) {
+  let inserted = 0;
+  let modified = 0;
+  let matched = 0;
+
+  for (const doc of documents) {
+    const updateOperator = reset ? { $set: doc } : { $setOnInsert: doc };
+    const res = await collection.updateOne(
+      { _id: doc._id },
+      updateOperator,
+      { upsert: true }
+    );
+    inserted += res && res.upsertedCount ? res.upsertedCount : 0;
+    modified += res && res.modifiedCount ? res.modifiedCount : 0;
+    matched += res && res.matchedCount ? res.matchedCount : 0;
+  }
+
+  return { inserted, modified, matched, total: documents.length };
+}
+
+/**
+ * Seed teachers/lessons safely (or reset them when options.reset is true) and ensure indexes.
+ */
+async function seedDatabase(db, options = {}) {
+  const reset = Boolean(options.reset);
+  const teacherStats = await upsertSeedCollection(db.collection('teacher'), teachers, reset);
+  const lessonStats = await upsertSeedCollection(db.collection('lesson'), lessons, reset);
+  const indexes = await ensureIndexes(db);
+
+  return {
+    reset,
+    teachers: teacherStats,
+    lessons: lessonStats,
+    indexes
+  };
+}
+
+async function run(options = {}) {
+  const mongoUri = options.mongoUri ?? process.env.MONGODB_URI;
+  const dbName = options.dbName ?? process.env.DB_NAME ?? DEFAULT_DB_NAME;
+  const seedOptions = options.argv ? parseSeedOptions(options.argv) : { reset: Boolean(options.reset) };
+  const createClient =
+    typeof options.createClient === 'function'
+      ? options.createClient
+      : (uri) => new MongoClient(uri);
+
+  if (!mongoUri) {
+    throw new Error('MONGODB_URI is not defined in environment variables.');
+  }
+
+  const client = createClient(mongoUri);
   try {
     await client.connect();
-    const db = client.db(DB_NAME);
-
-    // Upsert teachers: updates existing or inserts new, never creates duplicates
-    for (const teacher of teachers) {
-      await db.collection('teacher').updateOne(
-        { _id: teacher._id },
-        { $set: teacher },
-        { upsert: true }
-      );
-    }
-
-    // Upsert lessons: updates existing or inserts new, never creates duplicates
-    for (const lesson of lessons) {
-      await db.collection('lesson').updateOne(
-        { _id: lesson._id },
-        { $set: lesson },
-        { upsert: true }
-      );
-    }
-
-    console.log(`Seeded ${teachers.length} teachers and ${lessons.length} lessons.`);
-  } catch (error) {
-    console.error('Seed error:', error.message);
-    process.exit(1);
+    const db = client.db(dbName);
+    const summary = await seedDatabase(db, seedOptions);
+    const modeLabel = summary.reset ? 'reset (--reset)' : 'safe ($setOnInsert)';
+    console.log(
+      `Seed complete [${modeLabel}]: ` +
+      `${summary.teachers.inserted} teacher(s) inserted, ${summary.teachers.modified} updated; ` +
+      `${summary.lessons.inserted} lesson(s) inserted, ${summary.lessons.modified} updated.`
+    );
+    return summary;
   } finally {
     await client.close();
   }
 }
 
-run();
+if (require.main === module) {
+  run({ argv: process.argv.slice(2) }).catch((error) => {
+    console.error('Seed error:', error.message);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  teacherIds,
+  lessonIds,
+  teachers,
+  lessons,
+  INDEX_DEFINITIONS,
+  parseSeedOptions,
+  ensureIndexes,
+  seedDatabase,
+  run
+};
