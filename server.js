@@ -40,6 +40,7 @@ async function startServer(options = {}) {
       : (process.env.PORT || 3000);
   const mongoUri = options.mongoUri ?? process.env.MONGODB_URI;
   const dbName = options.dbName ?? process.env.DB_NAME ?? DEFAULT_DB_NAME;
+  const corsOrigin = 'corsOrigin' in options ? options.corsOrigin : process.env.CORS_ORIGIN;
   const createClient =
     typeof options.createClient === 'function'
       ? options.createClient
@@ -60,7 +61,8 @@ async function startServer(options = {}) {
     const app = createApp({
       getDb: () => db,
       getClient: () => client,
-      dbName
+      dbName,
+      corsOrigin
     });
 
     httpServer = await listenAsync(app, port);

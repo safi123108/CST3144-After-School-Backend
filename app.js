@@ -4,6 +4,7 @@ const path = require('path');
 const { ObjectId } = require('mongodb');
 const { createImageMiddleware } = require('./middleware/images');
 const { fetchAllLessons, searchLessons } = require('./services/lessons');
+const { createCorsOptions } = require('./config/cors');
 
 const DEFAULT_DB_NAME = 'after_school_app';
 const DEFAULT_IMAGES_DIR = path.join(__dirname, 'public', 'images');
@@ -66,11 +67,12 @@ function createApp(options = {}) {
   const getClient = resolveAccessor(options.getClient, options.client);
   const dbName = options.dbName || DEFAULT_DB_NAME;
   const imagesDir = options.imagesDir || DEFAULT_IMAGES_DIR;
+  const corsOrigin = 'corsOrigin' in options ? options.corsOrigin : process.env.CORS_ORIGIN;
 
   const app = express();
 
   // Enable Cross-Origin Resource Sharing (CORS)
-  app.use(cors());
+  app.use(cors(createCorsOptions(corsOrigin)));
 
   // Request logger middleware: logs HTTP method and requested URL
   app.use((req, res, next) => {
