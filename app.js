@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const path = require('path');
 const { ObjectId } = require('mongodb');
+const { createImageMiddleware } = require('./middleware/images');
 
 const DEFAULT_DB_NAME = 'after_school_app';
 const DEFAULT_IMAGES_DIR = path.join(__dirname, 'public', 'images');
@@ -52,16 +53,8 @@ function createApp(options = {}) {
   // Parse incoming JSON request bodies
   app.use(express.json());
 
-  // Static image middleware: serve files from public/images
-  app.use('/images', express.static(imagesDir));
-
-  // 404 fallback specifically for missing image requests under /images
-  app.use('/images', (req, res) => {
-    res.status(404).json({
-      error: 'Image not found',
-      message: `The requested image file '${path.basename(req.url)}' does not exist on this server.`
-    });
-  });
+  // Static image serving, seeded .png -> .svg fallback, and clean 404 JSON handling
+  app.use('/images', createImageMiddleware({ imagesDir }));
 
   // Guard database-backed API endpoints when MongoDB is not connected
   const requireDb = (req, res, next) => {
